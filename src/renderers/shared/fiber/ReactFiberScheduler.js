@@ -70,6 +70,9 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) {
     SynchronousPriority :
     LowPriority;
 
+  // Tracks whether sync updates are in batched mode.
+  let isBatchingSyncUpdates : boolean = false;
+
   // The next work in progress fiber that we're currently working on.
   let nextUnitOfWork : ?Fiber = null;
   let nextPriorityLevel : PriorityLevel = NoWork;
@@ -455,9 +458,14 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) {
     while (nextUnitOfWork &&
            nextPriorityLevel === SynchronousPriority) {
       nextUnitOfWork = performUnitOfWork(nextUnitOfWork, false);
-      // If there's no nextUnitOfWork, we don't need to search for more
-      // because it shouldn't be possible to schedule sync work without
-      // immediately performing it
+
+      if (!nextUnitOfWork && isBatchingSyncUpdates) {
+        isBatchingSyncUpdates = false;
+        nextUnitOfWork = findNextUnitOfWork();
+      }
+      // If there's no nextUnitOfWork, and we're not in batching mode, we don't
+      // need to search for more work because it shouldn't be possible to
+      // schedule sync work without immediately performing it
     }
     if (nextUnitOfWork) {
       if (nextPriorityLevel > AnimationPriority) {
@@ -470,6 +478,16 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) {
 
   function performSynchronousWork() {
     performAndHandleErrors(performSynchronousWorkUnsafe);
+  }
+
+  function scheduleSynchronousWork(root: FiberRoot) {
+    root.current.pendingWorkPriority = SynchronousPriority;
+
+    // Unless in batch mode, perform the work immediately. Otherwise, the work
+    // will be flushed at the end of the batch.
+    if (!isBatchingSyncUpdates) {
+      performSynchronousWork();
+    }
   }
 
   function performAndHandleErrors<A>(fn: (a: A) => void, a: A) {
@@ -550,8 +568,7 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) {
     }
 
     if (priorityLevel === SynchronousPriority) {
-      root.current.pendingWorkPriority = SynchronousPriority;
-      performSynchronousWork();
+      scheduleSynchronousWork(root);
     }
 
     if (priorityLevel === NoWork) {
@@ -572,13 +589,18 @@ module.exports = function<T, P, I, TI, C>(config : HostConfig<T, P, I, TI, C>) {
         defaultPriorityContext;
     }
 
-    // Don't bother bubbling the priority to the root if it is synchronous. Just
-    // perform it now.
     if (priorityLevel === SynchronousPriority) {
-      fiber.pendingWorkPriority = SynchronousPriority;
-      nextUnitOfWork = fiber;
-      performSynchronousWork();
-      return;
+      if (useSyncScheduling) {
+        // Begin batched mode
+        isBatchingSyncUpdates = true;
+      } else {
+        // Don't bother bubbling the priority to the root if it is synchronous. Just
+        // perform it now.
+        fiber.pendingWorkPriority = SynchronousPriority;
+        nextUnitOfWork = fiber;
+        performSynchronousWork();
+        return;
+      }
     }
 
     while (true) {
